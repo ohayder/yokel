@@ -963,87 +963,257 @@ func updateSettingsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func createVoucherHandler(w http.ResponseWriter, r *http.Request) {
-	/*
-	  _______ ____  _____   ____  
-	 |__   __/ __ \|  __ \ / __ \ 
-	    | | | |  | | |  | | |  | |
-	    | | | |  | | |  | | |  | |
-	    | | | |__| | |__| | |__| |
-	    |_|  \____/|_____/ \____/ 
-	                              
-	Implement createVoucherHandler
-	*/
-	http.Error(w, "Not implemented", http.StatusNotImplemented)
+    // Get the user ID from the context (set by the authenticateSession middleware)
+    userID, ok := r.Context().Value("userID").(uint)
+    if !ok {
+        http.Error(w, "User ID not found in context", http.StatusInternalServerError)
+        return
+    }
+
+    // Parse the voucher lifetime from the header
+    lifetimeStr := r.Header.Get(HeaderVoucherLifetime)
+    lifetime, err := time.ParseDuration(lifetimeStr)
+    if err != nil || lifetime <= 0 {
+        http.Error(w, "Invalid voucher lifetime", http.StatusBadRequest)
+        return
+    }
+
+    // Check if the lifetime exceeds the maximum allowed
+    maxLifetime, _ := time.ParseDuration(config.VoucherMaxLifetime)
+    if lifetime > maxLifetime {
+        http.Error(w, "Voucher lifetime exceeds maximum allowed", http.StatusBadRequest)
+        return
+    }
+
+    // Check if the user has reached the maximum number of vouchers
+    var voucherCount int64
+    if err := db.Model(&Voucher{}).Where("user_id = ?", userID).Count(&voucherCount).Error; err != nil {
+        http.Error(w, "Failed to check voucher count", http.StatusInternalServerError)
+        return
+    }
+    if int(voucherCount) >= config.VoucherMaxPerUser {
+        http.Error(w, "Maximum number of vouchers reached", http.StatusForbidden)
+        return
+    }
+
+    // Generate a new voucher
+    voucherID := generateUUID()
+    expiresAt := time.Now().Add(lifetime)
+    voucher := Voucher{
+        VoucherID: voucherID,
+        UserID:    userID,
+        ExpiresAt: expiresAt,
+    }
+
+    // Save the voucher to the database
+    if err := db.Create(&voucher).Error; err != nil {
+        http.Error(w, "Failed to create voucher", http.StatusInternalServerError)
+        return
+    }
+
+    // Respond with the created voucher
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(map[string]string{
+        "voucher_id": voucherID,
+        "expires_at": expiresAt.Format(time.RFC3339),
+    })
 }
 
 func readVouchersHandler(w http.ResponseWriter, r *http.Request) {
-	/*
-	  _______ ____  _____   ____  
-	 |__   __/ __ \|  __ \ / __ \ 
-	    | | | |  | | |  | | |  | |
-	    | | | |  | | |  | | |  | |
-	    | | | |__| | |__| | |__| |
-	    |_|  \____/|_____/ \____/ 
-	                              
-	Implement readVouchersHandler
-	*/
-	http.Error(w, "Not implemented", http.StatusNotImplemented)
+    // Get the user ID from the context (set by the authenticateSession middleware)
+    userID, ok := r.Context().Value("userID").(uint)
+    if !ok {
+        http.Error(w, "User ID not found in context", http.StatusInternalServerError)
+        return
+    }
+
+    // Retrieve all vouchers for the user from the database
+    var vouchers []Voucher
+    if err := db.Where("user_id = ?", userID).Find(&vouchers).Error; err != nil {
+        http.Error(w, "Failed to retrieve vouchers", http.StatusInternalServerError)
+        return
+    }
+
+    // Create a response struct to control what data is sent back
+    type VoucherResponse struct {
+        VoucherID string    `json:"voucher_id"`
+        ExpiresAt time.Time `json:"expires_at"`
+    }
+
+    var response []VoucherResponse
+    for _, v := range vouchers {
+        response = append(response, VoucherResponse{
+            VoucherID: v.VoucherID,
+            ExpiresAt: v.ExpiresAt,
+        })
+    }
+
+    // Send the response
+    w.Header().Set("Content-Type", "application/json")
+    if err := json.NewEncoder(w).Encode(response); err != nil {
+        http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+        return
+    }
 }
 
 func deleteVoucherHandler(w http.ResponseWriter, r *http.Request) {
-	/*
-	  _______ ____  _____   ____  
-	 |__   __/ __ \|  __ \ / __ \ 
-	    | | | |  | | |  | | |  | |
-	    | | | |  | | |  | | |  | |
-	    | | | |__| | |__| | |__| |
-	    |_|  \____/|_____/ \____/ 
-	                              
-	Implement deleteVoucherHandler
-	*/
-	http.Error(w, "Not implemented", http.StatusNotImplemented)
+    // Get the user ID from the context (set by the authenticateSession middleware)
+    userID, ok := r.Context().Value("userID").(uint)
+    if !ok {
+        http.Error(w, "User ID not found in context", http.StatusInternalServerError)
+        return
+    }
+
+    // Get the voucher ID from the query parameters
+    voucherID := r.URL.Query().Get("voucher_id")
+    if voucherID == "" {
+        http.Error(w, "Voucher ID is required", http.StatusBadRequest)
+        return
+    }
+
+    // Find the voucher in the database
+    var voucher Voucher
+    if err := db.Where("voucher_id = ? AND user_id = ?", voucherID, userID).First(&voucher).Error; err != nil {
+        if err == gorm.ErrRecordNotFound {
+            http.Error(w, "Voucher not found or does not belong to the user", http.StatusNotFound)
+        } else {
+            http.Error(w, "Failed to retrieve voucher", http.StatusInternalServerError)
+        }
+        return
+    }
+
+    // Delete the voucher
+    if err := db.Delete(&voucher).Error; err != nil {
+        http.Error(w, "Failed to delete voucher", http.StatusInternalServerError)
+        return
+    }
+
+    // Respond with success message
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(map[string]string{
+        "message": "Voucher deleted successfully",
+    })
+}
+// Add this to your models
+type UserKV struct {
+    gorm.Model
+    UserID uint   `gorm:"index"`
+    Key    string `gorm:"index"`
+    Value  string
 }
 
 func kvReadHandler(w http.ResponseWriter, r *http.Request) {
-	/*
-	  _______ ____  _____   ____  
-	 |__   __/ __ \|  __ \ / __ \ 
-	    | | | |  | | |  | | |  | |
-	    | | | |  | | |  | | |  | |
-	    | | | |__| | |__| | |__| |
-	    |_|  \____/|_____/ \____/ 
-	                              
-	Implement kvReadHandler
-	*/
-	http.Error(w, "Not implemented", http.StatusNotImplemented)
+    // Get the user ID from the context (set by the authenticateSession middleware)
+    userID, ok := r.Context().Value("userID").(uint)
+    if !ok {
+        http.Error(w, "User ID not found in context", http.StatusInternalServerError)
+        return
+    }
+
+    // Get the key from the URL parameters
+    vars := mux.Vars(r)
+    key := vars["key"]
+
+    // Retrieve the key-value pair from the database
+    var kv UserKV
+    if err := db.Where("user_id = ? AND key = ?", userID, key).First(&kv).Error; err != nil {
+        if err == gorm.ErrRecordNotFound {
+            http.Error(w, "Key not found", http.StatusNotFound)
+        } else {
+            http.Error(w, "Failed to retrieve key-value pair", http.StatusInternalServerError)
+        }
+        return
+    }
+
+    // Respond with the value
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(map[string]string{
+        "key":   kv.Key,
+        "value": kv.Value,
+    })
 }
 
 func kvWriteHandler(w http.ResponseWriter, r *http.Request) {
-	/*
-	  _______ ____  _____   ____  
-	 |__   __/ __ \|  __ \ / __ \ 
-	    | | | |  | | |  | | |  | |
-	    | | | |  | | |  | | |  | |
-	    | | | |__| | |__| | |__| |
-	    |_|  \____/|_____/ \____/ 
-	                              
-	Implement kvWriteHandler
-	*/
-	http.Error(w, "Not implemented", http.StatusNotImplemented)
+    // Get the user ID from the context (set by the authenticateSession middleware)
+    userID, ok := r.Context().Value("userID").(uint)
+    if !ok {
+        http.Error(w, "User ID not found in context", http.StatusInternalServerError)
+        return
+    }
+
+    // Get the key and value from the URL parameters
+    vars := mux.Vars(r)
+    key := vars["key"]
+    value := vars["value"]
+
+    // Check if the key already exists
+    var kv UserKV
+    result := db.Where("user_id = ? AND key = ?", userID, key).First(&kv)
+
+    if result.Error == nil {
+        // Key exists, update the value
+        kv.Value = value
+        if err := db.Save(&kv).Error; err != nil {
+            http.Error(w, "Failed to update key-value pair", http.StatusInternalServerError)
+            return
+        }
+    } else if result.Error == gorm.ErrRecordNotFound {
+        // Key doesn't exist, create a new key-value pair
+        kv = UserKV{
+            UserID: userID,
+            Key:    key,
+            Value:  value,
+        }
+        if err := db.Create(&kv).Error; err != nil {
+            http.Error(w, "Failed to create key-value pair", http.StatusInternalServerError)
+            return
+        }
+    } else {
+        // Other database error
+        http.Error(w, "Database error", http.StatusInternalServerError)
+        return
+    }
+
+    // Check if the user has exceeded the maximum allowed key-value pairs
+    var count int64
+    if err := db.Model(&UserKV{}).Where("user_id = ?", userID).Count(&count).Error; err != nil {
+        http.Error(w, "Failed to count key-value pairs", http.StatusInternalServerError)
+        return
+    }
+
+    if int(count) > config.UserDataMax {
+        http.Error(w, "Maximum number of key-value pairs reached", http.StatusForbidden)
+        return
+    }
+
+    // Respond with success message
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(map[string]string{
+        "message": "Key-value pair written successfully",
+    })
 }
 
 func kvClearHandler(w http.ResponseWriter, r *http.Request) {
-	/*
-	  _______ ____  _____   ____  
-	 |__   __/ __ \|  __ \ / __ \ 
-	    | | | |  | | |  | | |  | |
-	    | | | |  | | |  | | |  | |
-	    | | | |__| | |__| | |__| |
-	    |_|  \____/|_____/ \____/ 
-	                              
-	Implement kvClearHandler
-	*/
-	http.Error(w, "Not implemented", http.StatusNotImplemented)
+    // Get the user ID from the context (set by the authenticateSession middleware)
+    userID, ok := r.Context().Value("userID").(uint)
+    if !ok {
+        http.Error(w, "User ID not found in context", http.StatusInternalServerError)
+        return
+    }
+
+    // Delete all key-value pairs for the user
+    result := db.Where("user_id = ?", userID).Delete(&UserKV{})
+    if result.Error != nil {
+        http.Error(w, "Failed to clear key-value pairs", http.StatusInternalServerError)
+        return
+    }
+
+    // Respond with success message and number of deleted pairs
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(map[string]interface{}{
+        "message":        "All key-value pairs cleared successfully",
+        "pairs_deleted":  result.RowsAffected,
+    })
 }
 
 // Helper functions
