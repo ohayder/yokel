@@ -554,117 +554,412 @@ func loginUserHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
-// Additional handler functions to be implemented
 func authenticateVoucherHandler(w http.ResponseWriter, r *http.Request) {
-	/*
-	  _______ ____  _____   ____  
-	 |__   __/ __ \|  __ \ / __ \ 
-	    | | | |  | | |  | | |  | |
-	    | | | |  | | |  | | |  | |
-	    | | | |__| | |__| | |__| |
-	    |_|  \____/|_____/ \____/ 
-	                              
-	Implement authenticateVoucherHandler
-	*/
-	http.Error(w, "Not implemented", http.StatusNotImplemented)
+    // Extract the voucher ID from the request header
+    voucherID := r.Header.Get(HeaderUserVoucher)
+    if voucherID == "" {
+        http.Error(w, "Voucher ID is required", http.StatusBadRequest)
+        return
+    }
+
+    // Find the voucher in the database
+    var voucher Voucher
+    if err := db.Where("voucher_id = ?", voucherID).First(&voucher).Error; err != nil {
+        if err == gorm.ErrRecordNotFound {
+            http.Error(w, "Invalid voucher", http.StatusUnauthorized)
+        } else {
+            http.Error(w, "Internal server error", http.StatusInternalServerError)
+        }
+        return
+    }
+
+    // Check if the voucher has expired
+    if time.Now().After(voucher.ExpiresAt) {
+        http.Error(w, "Voucher has expired", http.StatusUnauthorized)
+        return
+    }
+
+    // Voucher is valid, create a new session for the user
+    sessionUUID := generateUUID()
+    expirationTime := time.Now().Add(30 * time.Minute)
+    
+    // Create and sign the JWT token
+    claims := &jwt.RegisteredClaims{
+        ExpiresAt: jwt.NewNumericDate(expirationTime),
+        ID:        sessionUUID,
+    }
+    token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+    tokenString, err := token.SignedString(jwtKey)
+    if err != nil {
+        http.Error(w, "Failed to generate session token", http.StatusInternalServerError)
+        return
+    }
+
+    // Store the new session in the database
+    session := Session{
+        SessionUUID: sessionUUID,
+        UserID:      voucher.UserID,
+        ExpiresAt:   expirationTime,
+    }
+    if err := db.Create(&session).Error; err != nil {
+        http.Error(w, "Failed to create session", http.StatusInternalServerError)
+        return
+    }
+
+    // Respond with the new session information
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(map[string]string{
+        "session_uuid":  sessionUUID,
+        "session_token": tokenString,
+    })
 }
 
 func bumpSessionHandler(w http.ResponseWriter, r *http.Request) {
-	/*
-	  _______ ____  _____   ____  
-	 |__   __/ __ \|  __ \ / __ \ 
-	    | | | |  | | |  | | |  | |
-	    | | | |  | | |  | | |  | |
-	    | | | |__| | |__| | |__| |
-	    |_|  \____/|_____/ \____/ 
-	                              
-	Implement bumpSessionHandler
-	*/
-	http.Error(w, "Not implemented", http.StatusNotImplemented)
+    // Extract the session UUID from the URL parameters
+    vars := mux.Vars(r)
+    sessionUUID := vars["sessionUUID"]
+
+    // Retrieve the session from the database
+    var session Session
+    if err := db.Where("session_uuid = ?", sessionUUID).First(&session).Error; err != nil {
+        if err == gorm.ErrRecordNotFound {
+            http.Error(w, "Session not found", http.StatusNotFound)
+        } else {
+            http.Error(w, "Internal server error", http.StatusInternalServerError)
+        }
+        return
+    }
+
+    // Check if the session has expired
+    if time.Now().After(session.ExpiresAt) {
+        http.Error(w, "Session has expired", http.StatusUnauthorized)
+        return
+    }
+
+    // Check if the session has exceeded the maximum number of bump attempts
+    if session.BumpAttempts >= 5 {
+        http.Error(w, "Maximum bump attempts exceeded", http.StatusTooManyRequests)
+        return
+    }
+
+    // Extend the session expiration time
+    newExpirationTime := time.Now().Add(30 * time.Minute)
+    session.ExpiresAt = newExpirationTime
+    session.BumpAttempts++
+
+    // Update the session in the database
+    if err := db.Save(&session).Error; err != nil {
+        http.Error(w, "Failed to update session", http.StatusInternalServerError)
+        return
+    }
+
+    // Create a new JWT token with the updated expiration time
+    claims := &jwt.RegisteredClaims{
+        ExpiresAt: jwt.NewNumericDate(newExpirationTime),
+        ID:        sessionUUID,
+    }
+    token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+    tokenString, err := token.SignedString(jwtKey)
+    if err != nil {
+        http.Error(w, "Failed to generate new session token", http.StatusInternalServerError)
+        return
+    }
+
+    // Respond with the updated session information
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(map[string]string{
+        "session_uuid":  sessionUUID,
+        "session_token": tokenString,
+    })
 }
 
 func logoutHandler(w http.ResponseWriter, r *http.Request) {
-	/*
-	  _______ ____  _____   ____  
-	 |__   __/ __ \|  __ \ / __ \ 
-	    | | | |  | | |  | | |  | |
-	    | | | |  | | |  | | |  | |
-	    | | | |__| | |__| | |__| |
-	    |_|  \____/|_____/ \____/ 
-	                              
-	Implement logoutHandler
-	*/
-	http.Error(w, "Not implemented", http.StatusNotImplemented)
+    // Extract the session UUID from the URL parameters
+    vars := mux.Vars(r)
+    sessionUUID := vars["sessionUUID"]
+
+    // Delete the session from the database
+    result := db.Where("session_uuid = ?", sessionUUID).Delete(&Session{})
+    if result.Error != nil {
+        http.Error(w, "Failed to logout", http.StatusInternalServerError)
+        return
+    }
+
+    // Check if a session was actually deleted
+    if result.RowsAffected == 0 {
+        http.Error(w, "Session not found", http.StatusNotFound)
+        return
+    }
+
+    // Respond with a success message
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(map[string]string{
+        "message": "Logged out successfully",
+    })
+
+
+	// LATER: VISIT THIS:
+    // Note: In a production environment, you might want to add the token
+    // to a blacklist or implement a token revocation mechanism
 }
 
 func readAccountHandler(w http.ResponseWriter, r *http.Request) {
-	/*
-	  _______ ____  _____   ____  
-	 |__   __/ __ \|  __ \ / __ \ 
-	    | | | |  | | |  | | |  | |
-	    | | | |  | | |  | | |  | |
-	    | | | |__| | |__| | |__| |
-	    |_|  \____/|_____/ \____/ 
-	                              
-	Implement readAccountHandler
-	*/
-	http.Error(w, "Not implemented", http.StatusNotImplemented)
+    // Get the user ID from the context (set by the authenticateSession middleware)
+    userID, ok := r.Context().Value("userID").(uint)
+    if !ok {
+        http.Error(w, "User ID not found in context", http.StatusInternalServerError)
+        return
+    }
+
+    // Retrieve the user from the database
+    var user User
+    if err := db.First(&user, userID).Error; err != nil {
+        if err == gorm.ErrRecordNotFound {
+            http.Error(w, "User not found", http.StatusNotFound)
+        } else {
+            http.Error(w, "Failed to retrieve user data", http.StatusInternalServerError)
+        }
+        return
+    }
+
+    // Create a response struct with the user data we want to expose
+    type AccountResponse struct {
+        Username string `json:"username"`
+        Email    string `json:"email"`
+        // Add any other fields you want to include in the response
+    }
+
+    response := AccountResponse{
+        Username: user.Username,
+        Email:    user.Email,
+    }
+
+    // Send the response
+    w.Header().Set("Content-Type", "application/json")
+    if err := json.NewEncoder(w).Encode(response); err != nil {
+        http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+    }
 }
 
 func updateAccountHandler(w http.ResponseWriter, r *http.Request) {
-	/*
-	  _______ ____  _____   ____  
-	 |__   __/ __ \|  __ \ / __ \ 
-	    | | | |  | | |  | | |  | |
-	    | | | |  | | |  | | |  | |
-	    | | | |__| | |__| | |__| |
-	    |_|  \____/|_____/ \____/ 
-	                              
-	Implement updateAccountHandler
-	*/
-	http.Error(w, "Not implemented", http.StatusNotImplemented)
+    // Get the user ID from the context (set by the authenticateSession middleware)
+    userID, ok := r.Context().Value("userID").(uint)
+    if !ok {
+        http.Error(w, "User ID not found in context", http.StatusInternalServerError)
+        return
+    }
+
+    // Parse the request body
+    var updateRequest struct {
+        Email    string `json:"email"`
+        Password string `json:"password"`
+    }
+    if err := json.NewDecoder(r.Body).Decode(&updateRequest); err != nil {
+        http.Error(w, "Invalid request body", http.StatusBadRequest)
+        return
+    }
+
+    // Retrieve the user from the database
+    var user User
+    if err := db.First(&user, userID).Error; err != nil {
+        http.Error(w, "User not found", http.StatusNotFound)
+        return
+    }
+
+    // Update email if provided
+    if updateRequest.Email != "" {
+        if err := validateEmail(updateRequest.Email); err != nil {
+            http.Error(w, err.Error(), http.StatusBadRequest)
+            return
+        }
+        user.Email = updateRequest.Email
+    }
+
+    // Update password if provided
+    if updateRequest.Password != "" {
+        hashedPassword, err := hashPassword(updateRequest.Password)
+        if err != nil {
+            http.Error(w, "Failed to process new password", http.StatusInternalServerError)
+            return
+        }
+        user.Password = hashedPassword
+    }
+
+    // Save the updated user to the database
+    if err := db.Save(&user).Error; err != nil {
+        http.Error(w, "Failed to update user", http.StatusInternalServerError)
+        return
+    }
+
+    // Respond with success message
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(map[string]string{
+        "message": "Account updated successfully",
+    })
 }
 
 func deleteAccountHandler(w http.ResponseWriter, r *http.Request) {
-	/*
-	  _______ ____  _____   ____  
-	 |__   __/ __ \|  __ \ / __ \ 
-	    | | | |  | | |  | | |  | |
-	    | | | |  | | |  | | |  | |
-	    | | | |__| | |__| | |__| |
-	    |_|  \____/|_____/ \____/ 
-	                              
-	Implement deleteAccountHandler
-	*/
-	http.Error(w, "Not implemented", http.StatusNotImplemented)
+    // Get the user ID from the context (set by the authenticateSession middleware)
+    userID, ok := r.Context().Value("userID").(uint)
+    if !ok {
+        http.Error(w, "User ID not found in context", http.StatusInternalServerError)
+        return
+    }
+
+    // Start a transaction
+    tx := db.Begin()
+
+    // Delete all sessions for the user
+    if err := tx.Where("user_id = ?", userID).Delete(&Session{}).Error; err != nil {
+        tx.Rollback()
+        http.Error(w, "Failed to delete user sessions", http.StatusInternalServerError)
+        return
+    }
+
+    // Delete all vouchers for the user
+    if err := tx.Where("user_id = ?", userID).Delete(&Voucher{}).Error; err != nil {
+        tx.Rollback()
+        http.Error(w, "Failed to delete user vouchers", http.StatusInternalServerError)
+        return
+    }
+
+    // Delete the user
+    if err := tx.Delete(&User{}, userID).Error; err != nil {
+        tx.Rollback()
+        http.Error(w, "Failed to delete user", http.StatusInternalServerError)
+        return
+    }
+
+    // Commit the transaction
+    if err := tx.Commit().Error; err != nil {
+        http.Error(w, "Failed to commit changes", http.StatusInternalServerError)
+        return
+    }
+
+    // Respond with success message
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(map[string]string{
+        "message": "Account deleted successfully",
+    })
+
+    // Note: In a production environment, you might want to implement a soft delete
+    // or archive user data instead of permanent deletion
 }
 
 func readSettingsHandler(w http.ResponseWriter, r *http.Request) {
-	/*
-	  _______ ____  _____   ____  
-	 |__   __/ __ \|  __ \ / __ \ 
-	    | | | |  | | |  | | |  | |
-	    | | | |  | | |  | | |  | |
-	    | | | |__| | |__| | |__| |
-	    |_|  \____/|_____/ \____/ 
-	                              
-	Implement readSettingsHandler
-	*/
-	http.Error(w, "Not implemented", http.StatusNotImplemented)
+    // Get the user ID from the context (set by the authenticateSession middleware)
+    userID, ok := r.Context().Value("userID").(uint)
+    if !ok {
+        http.Error(w, "User ID not found in context", http.StatusInternalServerError)
+        return
+    }
+
+    // Retrieve the user's settings from the database
+    var settings UserSettings
+    if err := db.Where("user_id = ?", userID).First(&settings).Error; err != nil {
+        if err == gorm.ErrRecordNotFound {
+            // If settings don't exist, return default settings
+            settings = UserSettings{
+                UserID:           userID,
+                NotificationsOn:  true,
+                DarkModeEnabled:  false,
+                Language:         "en",
+                // Add other default settings as needed
+            }
+        } else {
+            http.Error(w, "Failed to retrieve user settings", http.StatusInternalServerError)
+            return
+        }
+    }
+
+    // Create a response struct
+    type SettingsResponse struct {
+        NotificationsOn bool   `json:"notifications_on"`
+        DarkModeEnabled bool   `json:"dark_mode_enabled"`
+        Language        string `json:"language"`
+        // Add other settings fields as needed
+    }
+
+    response := SettingsResponse{
+        NotificationsOn:  settings.NotificationsOn,
+        DarkModeEnabled:  settings.DarkModeEnabled,
+        Language:         settings.Language,
+        // Map other settings fields
+    }
+
+    // Send the response
+    w.Header().Set("Content-Type", "application/json")
+    if err := json.NewEncoder(w).Encode(response); err != nil {
+        http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+    }
+}
+
+// Add this struct to your models
+type UserSettings struct {
+    gorm.Model
+    UserID           uint   `gorm:"uniqueIndex"`
+    NotificationsOn  bool
+    DarkModeEnabled  bool
+    Language         string
+    // Add other settings fields as needed
 }
 
 func updateSettingsHandler(w http.ResponseWriter, r *http.Request) {
-	/*
-	  _______ ____  _____   ____  
-	 |__   __/ __ \|  __ \ / __ \ 
-	    | | | |  | | |  | | |  | |
-	    | | | |  | | |  | | |  | |
-	    | | | |__| | |__| | |__| |
-	    |_|  \____/|_____/ \____/ 
-	                              
-	Implement updateSettingsHandler
-	*/
-	http.Error(w, "Not implemented", http.StatusNotImplemented)
+    // Get the user ID from the context (set by the authenticateSession middleware)
+    userID, ok := r.Context().Value("userID").(uint)
+    if !ok {
+        http.Error(w, "User ID not found in context", http.StatusInternalServerError)
+        return
+    }
+
+    // Parse the request body
+    var updateRequest struct {
+        NotificationsOn  *bool   `json:"notifications_on,omitempty"`
+        DarkModeEnabled  *bool   `json:"dark_mode_enabled,omitempty"`
+        Language         *string `json:"language,omitempty"`
+        // Add other settings fields as needed
+    }
+    if err := json.NewDecoder(r.Body).Decode(&updateRequest); err != nil {
+        http.Error(w, "Invalid request body", http.StatusBadRequest)
+        return
+    }
+
+    // Retrieve the user's settings from the database
+    var settings UserSettings
+    if err := db.Where("user_id = ?", userID).First(&settings).Error; err != nil {
+        if err == gorm.ErrRecordNotFound {
+            // If settings don't exist, create new settings
+            settings = UserSettings{UserID: userID}
+        } else {
+            http.Error(w, "Failed to retrieve user settings", http.StatusInternalServerError)
+            return
+        }
+    }
+
+    // Update settings if provided
+    if updateRequest.NotificationsOn != nil {
+        settings.NotificationsOn = *updateRequest.NotificationsOn
+    }
+    if updateRequest.DarkModeEnabled != nil {
+        settings.DarkModeEnabled = *updateRequest.DarkModeEnabled
+    }
+    if updateRequest.Language != nil {
+        // You might want to add validation for supported languages
+        settings.Language = *updateRequest.Language
+    }
+    // Update other settings fields as needed
+
+    // Save the updated settings to the database
+    if err := db.Save(&settings).Error; err != nil {
+        http.Error(w, "Failed to update settings", http.StatusInternalServerError)
+        return
+    }
+
+    // Respond with success message
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(map[string]string{
+        "message": "Settings updated successfully",
+    })
 }
 
 func createVoucherHandler(w http.ResponseWriter, r *http.Request) {
