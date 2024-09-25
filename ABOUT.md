@@ -157,13 +157,6 @@ User Structure:
 }
 ```
 
-Settings Structure:
-```
-{
-    
-}
-```
-
 # Configuration Options
 
 The following options can be set in the `yokel.yaml` configuration file:
@@ -180,3 +173,59 @@ The following options can be set in the `yokel.yaml` configuration file:
 - `jwt_secret_key`: Secret key used for JWT token signing and verification (automatically generated during installation)
 
 Note: The `jwt_secret_key` is automatically generated during installation for security reasons. You can change it manually in the configuration file if needed, but make sure to keep it secret and use a strong, random value.
+
+```
+
+# Additional Features
+
+## Rate Limiting
+
+The server implements rate limiting to protect against abuse. The current configuration allows:
+- 10 requests per second
+- Burst of 30 requests
+
+This is applied globally to all endpoints.
+
+## Password Security
+
+Passwords are securely hashed before storage using bcrypt. The system includes functions for:
+- Hashing passwords before storage
+- Verifying passwords during authentication
+
+## Input Validation
+
+The system includes validation functions for:
+- Email addresses
+- Usernames
+
+These validations are applied when creating or updating user accounts to ensure data integrity and security.
+
+## Session Management
+
+The system implements a robust session management system:
+- Sessions are stored in the database and linked to users
+- Each session has a UUID and an expiration time
+- JWTs (JSON Web Tokens) are used for session authentication
+- Sessions can be "bumped" to extend their lifetime
+- Failed bump attempts are tracked and can lead to session termination
+
+## Database Integration
+
+The system uses GORM (Go Object Relational Mapper) for database operations, providing:
+- Easy database interactions
+- Automatic creation and management of database tables based on struct definitions
+- Support for various database systems (the specific database used can be configured)
+
+## Conditional Key-Value Store
+
+The key-value store functionality can be enabled or disabled using the `no_kv` configuration option in `yokel.yaml`. When enabled, it allows users to store and retrieve arbitrary key-value pairs, with limits on the number of pairs per user.
+
+## Voucher System
+
+The voucher system allows for pre-authenticated, time-limited access to resources:
+- Vouchers can store up to 64 bytes of user data
+- Voucher lifetime is configurable, with a maximum set in the configuration
+- The number of vouchers per user is limited (configurable)
+- Vouchers can be created, listed, deleted, and authenticated
+
+These additional features enhance the security, flexibility, and functionality of the Yokel backend system beyond the core specifications.
