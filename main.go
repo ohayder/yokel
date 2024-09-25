@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"golang.org/x/crypto/bcrypt"
 	"net/mail"
+	"io"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/mux"
@@ -46,46 +47,56 @@ import (
 //   - kvWriteHandler
 //   - kvClearHandler
 
-// Configuration struct for yokel.yaml
-type Config struct {
-	Port                int    `yaml:"port"`
-	Binding             string `yaml:"binding"`
-	URL                 string `yaml:"url"`
-	Key                 string `yaml:"key"`
-	Cert                string `yaml:"cert"`
-	VoucherMaxLifetime  string `yaml:"voucher_max_lifetime"`
-	VoucherMaxPerUser   int    `yaml:"voucher_max_per_user"`
-	NoKV                bool   `yaml:"no_kv"`
-	UserDataMax         int    `yaml:"user_data_max"`
-	JWTSecretKey        string `yaml:"jwt_secret_key"`
-}
 
-// User model for GORM
-type User struct {
-	ID       uint   `gorm:"primaryKey"`
-	Username string `gorm:"uniqueIndex"`
-	Email    string
-	Password string
-	// Add other fields as needed...
-}
-
-// Session model
-type Session struct {
-	ID           uint   `gorm:"primaryKey"`
-	SessionUUID  string `gorm:"uniqueIndex"`
-	UserID       uint
-	ExpiresAt    time.Time
-	FailedBumps  int
-	BumpAttempts int
-}
-
-// Voucher model
+// Update the Voucher struct
 type Voucher struct {
-	ID        uint   `gorm:"primaryKey"`
-	VoucherID string `gorm:"uniqueIndex"`
-	UserID    uint
-	Data      string
-	ExpiresAt time.Time
+    gorm.Model
+    VoucherID string    `gorm:"uniqueIndex"`
+    UserID    uint
+    ExpiresAt time.Time
+    UserData  []byte    `gorm:"size:64"` // Up to 64 bytes of user data
+}
+
+// Update the Session struct
+type Session struct {
+    gorm.Model
+    SessionUUID   string    `gorm:"uniqueIndex"`
+    UserID        uint
+    ExpiresAt     time.Time
+    BumpAttempts  int       // Track the number of bump attempts
+    FailedBumps   int       // Track the number of failed bumps
+}
+
+// Update the Config struct (if needed)
+type Config struct {
+    Port               int    `yaml:"port"`
+    Binding            string `yaml:"binding"`
+    URL                string `yaml:"url"`
+    Key                string `yaml:"key"`
+    Cert               string `yaml:"cert"`
+    VoucherMaxLifetime string `yaml:"voucher_max_lifetime"`
+    VoucherMaxPerUser  int    `yaml:"voucher_max_per_user"`
+    NoKV               bool   `yaml:"no_kv"`
+    UserDataMax        int    `yaml:"user_data_max"`
+    JWTSecretKey       string `yaml:"jwt_secret_key"`
+}
+
+// The User struct seems to be already aligned with ABOUT.md, but here it is for reference:
+type User struct {
+    gorm.Model
+    Username string `gorm:"uniqueIndex"`
+    Email    string
+    Password string
+}
+
+// Update the UserSettings struct
+type UserSettings struct {
+    gorm.Model
+    UserID           uint   `gorm:"uniqueIndex"`
+    NotificationsOn  bool
+    DarkModeEnabled  bool
+    Language         string
+    // Add other settings fields as needed
 }
 
 // Global constants for default configuration
@@ -239,7 +250,7 @@ func startServer(path string) error {
 		return fmt.Errorf("failed to open database: %v", err)
 	}
 	// Migrate the schema
-	err = db.AutoMigrate(&User{}, &Session{}, &Voucher{})
+	err = db.AutoMigrate(&User{}, &Session{}, &Voucher{}, &UserSettings{})
 	if err != nil {
 		return fmt.Errorf("failed to migrate database: %v", err)
 	}
@@ -636,16 +647,27 @@ func bumpSessionHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    // Check if the session has exceeded the maximum number of bump attempts
-    if session.BumpAttempts >= 5 {
-        http.Error(w, "Maximum bump attempts exceeded", http.StatusTooManyRequests)
+    // Check if the session needs to be bumped (less than 5 minutes remaining)
+    if time.Until(session.ExpiresAt) > 5*time.Minute {
+        session.FailedBumps++
+        if session.FailedBumps >= 5 {
+            // Delete the session if too many failed bumps
+            db.Delete(&session)
+            http.Error(w, "Session terminated due to excessive failed bumps", http.StatusUnauthorized)
+            return
+        }
+        if err := db.Save(&session).Error; err != nil {
+            http.Error(w, "Failed to update session", http.StatusInternalServerError)
+            return
+        }
+        http.Error(w, "Session does not need to be bumped yet", http.StatusBadRequest)
         return
     }
 
     // Extend the session expiration time
     newExpirationTime := time.Now().Add(30 * time.Minute)
     session.ExpiresAt = newExpirationTime
-    session.BumpAttempts++
+    session.FailedBumps = 0 // Reset failed bumps on successful bump
 
     // Update the session in the database
     if err := db.Save(&session).Error; err != nil {
@@ -697,8 +719,6 @@ func logoutHandler(w http.ResponseWriter, r *http.Request) {
         "message": "Logged out successfully",
     })
 
-
-	// LATER: VISIT THIS:
     // Note: In a production environment, you might want to add the token
     // to a blacklist or implement a token revocation mechanism
 }
@@ -894,16 +914,6 @@ func readSettingsHandler(w http.ResponseWriter, r *http.Request) {
     }
 }
 
-// Add this struct to your models
-type UserSettings struct {
-    gorm.Model
-    UserID           uint   `gorm:"uniqueIndex"`
-    NotificationsOn  bool
-    DarkModeEnabled  bool
-    Language         string
-    // Add other settings fields as needed
-}
-
 func updateSettingsHandler(w http.ResponseWriter, r *http.Request) {
     // Get the user ID from the context (set by the authenticateSession middleware)
     userID, ok := r.Context().Value("userID").(uint)
@@ -985,14 +995,14 @@ func createVoucherHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    // Check if the user has reached the maximum number of vouchers
-    var voucherCount int64
-    if err := db.Model(&Voucher{}).Where("user_id = ?", userID).Count(&voucherCount).Error; err != nil {
-        http.Error(w, "Failed to check voucher count", http.StatusInternalServerError)
+    // Read user data from request body
+    userData, err := io.ReadAll(r.Body)
+    if err != nil {
+        http.Error(w, "Failed to read request body", http.StatusBadRequest)
         return
     }
-    if int(voucherCount) >= config.VoucherMaxPerUser {
-        http.Error(w, "Maximum number of vouchers reached", http.StatusForbidden)
+    if len(userData) > 64 {
+        http.Error(w, "User data exceeds 64 bytes limit", http.StatusBadRequest)
         return
     }
 
@@ -1003,6 +1013,18 @@ func createVoucherHandler(w http.ResponseWriter, r *http.Request) {
         VoucherID: voucherID,
         UserID:    userID,
         ExpiresAt: expiresAt,
+        UserData:  userData,
+    }
+
+    // Check if the user has reached the maximum number of vouchers
+    var voucherCount int64
+    if err := db.Model(&Voucher{}).Where("user_id = ?", userID).Count(&voucherCount).Error; err != nil {
+        http.Error(w, "Failed to check voucher count", http.StatusInternalServerError)
+        return
+    }
+    if int(voucherCount) >= config.VoucherMaxPerUser {
+        http.Error(w, "Maximum number of vouchers reached", http.StatusForbidden)
+        return
     }
 
     // Save the voucher to the database
@@ -1094,7 +1116,8 @@ func deleteVoucherHandler(w http.ResponseWriter, r *http.Request) {
         "message": "Voucher deleted successfully",
     })
 }
-// Add this to your models
+
+// Add this struct to your models
 type UserKV struct {
     gorm.Model
     UserID uint   `gorm:"index"`
