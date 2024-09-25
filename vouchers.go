@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5"
 	"gorm.io/gorm"
 )
 
@@ -35,41 +34,14 @@ func authenticateVoucherHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    // Voucher is valid, create a new session for the user
-    sessionUUID := generateUUID()
-    expirationTime := time.Now().Add(30 * time.Minute)
-    
-    // Create and sign the JWT token
-    claims := &jwt.RegisteredClaims{
-        ExpiresAt: jwt.NewNumericDate(expirationTime),
-        ID:        sessionUUID,
-    }
-    token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-    tokenString, err := token.SignedString(jwtKey)
-    if err != nil {
-        http.Error(w, "Failed to generate session token", http.StatusInternalServerError)
-        return
-    }
-
-    // Store the new session in the database
-    session := Session{
-        SessionUUID: sessionUUID,
-        UserID:      voucher.UserID,
-        ExpiresAt:   expirationTime,
-    }
-    if err := db.Create(&session).Error; err != nil {
-        http.Error(w, "Failed to create session", http.StatusInternalServerError)
-        return
-    }
-
-    // Respond with the new session information
+    // Voucher is valid, return the encoded data
     w.Header().Set("Content-Type", "application/json")
-    json.NewEncoder(w).Encode(map[string]string{
-        "session_uuid":  sessionUUID,
-        "session_token": tokenString,
+    json.NewEncoder(w).Encode(map[string]interface{}{
+        "voucher_id": voucher.VoucherID,
+        "expires_at": voucher.ExpiresAt,
+        "user_data":  voucher.UserData,
     })
 }
-
 
 func createVoucherHandler(w http.ResponseWriter, r *http.Request) {
     // Get the user ID from the context (set by the authenticateSession middleware)
