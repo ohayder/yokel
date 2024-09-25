@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -25,7 +24,27 @@ import (
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
+	"golang.org/x/time/rate"
 )
+
+// TODO List:
+// - Implement proper email sending for user creation
+// - Implement proper finalization token validation
+// - Implement the following handler functions:
+//   - authenticateVoucherHandler
+//   - bumpSessionHandler
+//   - logoutHandler
+//   - readAccountHandler
+//   - updateAccountHandler
+//   - deleteAccountHandler
+//   - readSettingsHandler
+//   - updateSettingsHandler
+//   - createVoucherHandler
+//   - readVouchersHandler
+//   - deleteVoucherHandler
+//   - kvReadHandler
+//   - kvWriteHandler
+//   - kvClearHandler
 
 // Configuration struct for yokel.yaml
 type Config struct {
@@ -38,6 +57,7 @@ type Config struct {
 	VoucherMaxPerUser   int    `yaml:"voucher_max_per_user"`
 	NoKV                bool   `yaml:"no_kv"`
 	UserDataMax         int    `yaml:"user_data_max"`
+	JWTSecretKey        string `yaml:"jwt_secret_key"`
 }
 
 // User model for GORM
@@ -85,6 +105,7 @@ var (
 	config      Config
 	installPath string
 	jwtKey      []byte
+	limiter     *rate.Limiter
 )
 
 // Global constants for filenames
@@ -107,6 +128,9 @@ const (
 )
 
 func main() {
+	// Initialize rate limiter (10 requests per second, burst of 30)
+	limiter = rate.NewLimiter(10, 30)
+
 	// Define command-line flags
 	installFlag := flag.String("install", "", "Install the server onto the system in a specific directory")
 	upFlag := flag.String("up", "", "Start the server based on the yaml configuration found in the install directory")
@@ -159,6 +183,12 @@ func installServer(path string) error {
 		return err
 	}
 
+	// Generate a secure random string for the JWT secret key
+	jwtSecretKey, err := generateSecureRandomString(32) // 32 bytes = 256 bits
+	if err != nil {
+		return fmt.Errorf("failed to generate JWT secret key: %v", err)
+	}
+
 	// Create default yokel.yaml
 	defaultConfig := Config{
 		Port:               DefaultPort,
@@ -168,6 +198,7 @@ func installServer(path string) error {
 		VoucherMaxPerUser:  DefaultVoucherMaxPerUser,
 		UserDataMax:        DefaultUserDataMax,
 		NoKV:               DefaultNoKV,
+		JWTSecretKey:       jwtSecretKey,
 	}
 	data, err := yaml.Marshal(&defaultConfig)
 	if err != nil {
@@ -196,8 +227,8 @@ func startServer(path string) error {
 		return fmt.Errorf("failed to parse config file: %v", err)
 	}
 
-	// Initialize JWT key
-	jwtKey = []byte("your_secret_key") // Replace with a secure key
+	// Initialize JWT key from the configuration
+	jwtKey = []byte(config.JWTSecretKey)
 
 	// Initialize database
 	dbPath := filepath.Join(path, DbFileName)
@@ -275,30 +306,30 @@ func setupRouter() *mux.Router {
 	api := r.PathPrefix("/api/v1").Subrouter()
 
 	// Public endpoints
-	api.HandleFunc("/user/create", createUserHandler).Methods("POST")
-	api.HandleFunc("/user/finalize", finalizeUserHandler).Methods("POST")
-	api.HandleFunc("/user/login", loginUserHandler).Methods("POST")
-	api.HandleFunc("/voucher/authenticate", authenticateVoucherHandler).Methods("GET")
+	api.HandleFunc("/user/create", rateLimitMiddleware(createUserHandler)).Methods("POST")
+	api.HandleFunc("/user/finalize", rateLimitMiddleware(finalizeUserHandler)).Methods("POST")
+	api.HandleFunc("/user/login", rateLimitMiddleware(loginUserHandler)).Methods("POST")
+	api.HandleFunc("/voucher/authenticate", rateLimitMiddleware(authenticateVoucherHandler)).Methods("GET")
 
 	// Restricted endpoints (require authentication)
-	api.HandleFunc("/user/account/{sessionUUID}/bump", authenticateSession(bumpSessionHandler)).Methods("POST")
-	api.HandleFunc("/user/account/{sessionUUID}/logout", authenticateSession(logoutHandler)).Methods("POST")
-	api.HandleFunc("/user/account/{sessionUUID}/read", authenticateSession(readAccountHandler)).Methods("GET")
-	api.HandleFunc("/user/account/{sessionUUID}/update", authenticateSession(updateAccountHandler)).Methods("POST")
-	api.HandleFunc("/user/account/{sessionUUID}/delete", authenticateSession(deleteAccountHandler)).Methods("DELETE")
+	api.HandleFunc("/user/account/{sessionUUID}/bump", rateLimitMiddleware(authenticateSession(bumpSessionHandler))).Methods("POST")
+	api.HandleFunc("/user/account/{sessionUUID}/logout", rateLimitMiddleware(authenticateSession(logoutHandler))).Methods("POST")
+	api.HandleFunc("/user/account/{sessionUUID}/read", rateLimitMiddleware(authenticateSession(readAccountHandler))).Methods("GET")
+	api.HandleFunc("/user/account/{sessionUUID}/update", rateLimitMiddleware(authenticateSession(updateAccountHandler))).Methods("POST")
+	api.HandleFunc("/user/account/{sessionUUID}/delete", rateLimitMiddleware(authenticateSession(deleteAccountHandler))).Methods("DELETE")
 
-	api.HandleFunc("/user/settings/{sessionUUID}/read", authenticateSession(readSettingsHandler)).Methods("GET")
-	api.HandleFunc("/user/settings/{sessionUUID}/update", authenticateSession(updateSettingsHandler)).Methods("POST")
+	api.HandleFunc("/user/settings/{sessionUUID}/read", rateLimitMiddleware(authenticateSession(readSettingsHandler))).Methods("GET")
+	api.HandleFunc("/user/settings/{sessionUUID}/update", rateLimitMiddleware(authenticateSession(updateSettingsHandler))).Methods("POST")
 
-	api.HandleFunc("/user/voucher/{sessionUUID}/create", authenticateSession(createVoucherHandler)).Methods("POST")
-	api.HandleFunc("/user/voucher/{sessionUUID}/read", authenticateSession(readVouchersHandler)).Methods("GET")
-	api.HandleFunc("/user/voucher/{sessionUUID}/delete", authenticateSession(deleteVoucherHandler)).Methods("DELETE")
+	api.HandleFunc("/user/voucher/{sessionUUID}/create", rateLimitMiddleware(authenticateSession(createVoucherHandler))).Methods("POST")
+	api.HandleFunc("/user/voucher/{sessionUUID}/read", rateLimitMiddleware(authenticateSession(readVouchersHandler))).Methods("GET")
+	api.HandleFunc("/user/voucher/{sessionUUID}/delete", rateLimitMiddleware(authenticateSession(deleteVoucherHandler))).Methods("DELETE")
 
 	// Optional KV endpoints if NoKV is false
 	if !config.NoKV {
-		api.HandleFunc("/user/kv/{sessionUUID}/read/{key}", authenticateSession(kvReadHandler)).Methods("GET")
-		api.HandleFunc("/user/kv/{sessionUUID}/write/{key}/{value}", authenticateSession(kvWriteHandler)).Methods("GET")
-		api.HandleFunc("/user/kv/{sessionUUID}/clear", authenticateSession(kvClearHandler)).Methods("DELETE")
+		api.HandleFunc("/user/kv/{sessionUUID}/read/{key}", rateLimitMiddleware(authenticateSession(kvReadHandler))).Methods("GET")
+		api.HandleFunc("/user/kv/{sessionUUID}/write/{key}/{value}", rateLimitMiddleware(authenticateSession(kvWriteHandler))).Methods("GET")
+		api.HandleFunc("/user/kv/{sessionUUID}/clear", rateLimitMiddleware(authenticateSession(kvClearHandler))).Methods("DELETE")
 	}
 
 	// Handle CORS preflight requests
@@ -313,6 +344,17 @@ func setupRouter() *mux.Router {
 	return r
 }
 
+// Rate limiting middleware
+func rateLimitMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !limiter.Allow() {
+			http.Error(w, "Too many requests", http.StatusTooManyRequests)
+			return
+		}
+		next.ServeHTTP(w, r)
+	}
+}
+
 // Middleware to authenticate session
 func authenticateSession(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -324,7 +366,7 @@ func authenticateSession(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		// Validate JWT token
-		claims := &jwt.StandardClaims{}
+		claims := &jwt.RegisteredClaims{}
 		token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
 			return jwtKey, nil
 		})
@@ -335,7 +377,7 @@ func authenticateSession(next http.HandlerFunc) http.HandlerFunc {
 
 		// Check if session UUID matches
 		sessionUUID := mux.Vars(r)["sessionUUID"]
-		if claims.Id != sessionUUID {
+		if claims.ID != sessionUUID {
 			http.Error(w, "Session UUID mismatch", http.StatusUnauthorized)
 			return
 		}
@@ -355,7 +397,7 @@ func authenticateSession(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// Handler functions (to be implemented)
+// Handler functions
 
 // createUserHandler handles /api/v1/user/create
 func createUserHandler(w http.ResponseWriter, r *http.Request) {
@@ -382,8 +424,17 @@ func createUserHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Send magic link with finalization token (stubbed out)
 	finalizationToken := generateUUID()
-	// Here you would send an email containing the finalization token
-	// For now, we just return the token in the response (for testing)
+	/*
+	  _______ ____  _____   ____  
+	 |__   __/ __ \|  __ \ / __ \ 
+	    | | | |  | | |  | | |  | |
+	    | | | |  | | |  | | |  | |
+	    | | | |__| | |__| | |__| |
+	    |_|  \____/|_____/ \____/ 
+	                              
+	Here you would send an email containing the finalization token
+	For now, we just return the token in the response (for testing)
+	*/
 
 	w.Header().Set("Content-Type", "application/json")
 	resp := map[string]string{
@@ -409,8 +460,17 @@ func finalizeUserHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate finalization token (stubbed out)
-	// In a real application, you would verify if the token is valid and associated with the username
+	/*
+	  _______ ____  _____   ____  
+	 |__   __/ __ \|  __ \ / __ \ 
+	    | | | |  | | |  | | |  | |
+	    | | | |  | | |  | | |  | |
+	    | | | |__| | |__| | |__| |
+	    |_|  \____/|_____/ \____/ 
+	                              
+	Validate finalization token (stubbed out)
+	In a real application, you would verify if the token is valid and associated with the username
+	*/
 
 	// Hash the password
 	hashedPassword, err := hashPassword(password)
@@ -466,9 +526,9 @@ func loginUserHandler(w http.ResponseWriter, r *http.Request) {
 	// Create session UUID and JWT
 	sessionUUID := generateUUID()
 	expirationTime := time.Now().Add(30 * time.Minute)
-	claims := &jwt.StandardClaims{
-		ExpiresAt: expirationTime.Unix(),
-		Id:        sessionUUID,
+	claims := &jwt.RegisteredClaims{
+		ExpiresAt: jwt.NewNumericDate(expirationTime),
+		ID:        sessionUUID,
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	tokenString, err := token.SignedString(jwtKey)
@@ -494,7 +554,202 @@ func loginUserHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
-// Additional handler functions to be implemented similarly...
+// Additional handler functions to be implemented
+func authenticateVoucherHandler(w http.ResponseWriter, r *http.Request) {
+	/*
+	  _______ ____  _____   ____  
+	 |__   __/ __ \|  __ \ / __ \ 
+	    | | | |  | | |  | | |  | |
+	    | | | |  | | |  | | |  | |
+	    | | | |__| | |__| | |__| |
+	    |_|  \____/|_____/ \____/ 
+	                              
+	Implement authenticateVoucherHandler
+	*/
+	http.Error(w, "Not implemented", http.StatusNotImplemented)
+}
+
+func bumpSessionHandler(w http.ResponseWriter, r *http.Request) {
+	/*
+	  _______ ____  _____   ____  
+	 |__   __/ __ \|  __ \ / __ \ 
+	    | | | |  | | |  | | |  | |
+	    | | | |  | | |  | | |  | |
+	    | | | |__| | |__| | |__| |
+	    |_|  \____/|_____/ \____/ 
+	                              
+	Implement bumpSessionHandler
+	*/
+	http.Error(w, "Not implemented", http.StatusNotImplemented)
+}
+
+func logoutHandler(w http.ResponseWriter, r *http.Request) {
+	/*
+	  _______ ____  _____   ____  
+	 |__   __/ __ \|  __ \ / __ \ 
+	    | | | |  | | |  | | |  | |
+	    | | | |  | | |  | | |  | |
+	    | | | |__| | |__| | |__| |
+	    |_|  \____/|_____/ \____/ 
+	                              
+	Implement logoutHandler
+	*/
+	http.Error(w, "Not implemented", http.StatusNotImplemented)
+}
+
+func readAccountHandler(w http.ResponseWriter, r *http.Request) {
+	/*
+	  _______ ____  _____   ____  
+	 |__   __/ __ \|  __ \ / __ \ 
+	    | | | |  | | |  | | |  | |
+	    | | | |  | | |  | | |  | |
+	    | | | |__| | |__| | |__| |
+	    |_|  \____/|_____/ \____/ 
+	                              
+	Implement readAccountHandler
+	*/
+	http.Error(w, "Not implemented", http.StatusNotImplemented)
+}
+
+func updateAccountHandler(w http.ResponseWriter, r *http.Request) {
+	/*
+	  _______ ____  _____   ____  
+	 |__   __/ __ \|  __ \ / __ \ 
+	    | | | |  | | |  | | |  | |
+	    | | | |  | | |  | | |  | |
+	    | | | |__| | |__| | |__| |
+	    |_|  \____/|_____/ \____/ 
+	                              
+	Implement updateAccountHandler
+	*/
+	http.Error(w, "Not implemented", http.StatusNotImplemented)
+}
+
+func deleteAccountHandler(w http.ResponseWriter, r *http.Request) {
+	/*
+	  _______ ____  _____   ____  
+	 |__   __/ __ \|  __ \ / __ \ 
+	    | | | |  | | |  | | |  | |
+	    | | | |  | | |  | | |  | |
+	    | | | |__| | |__| | |__| |
+	    |_|  \____/|_____/ \____/ 
+	                              
+	Implement deleteAccountHandler
+	*/
+	http.Error(w, "Not implemented", http.StatusNotImplemented)
+}
+
+func readSettingsHandler(w http.ResponseWriter, r *http.Request) {
+	/*
+	  _______ ____  _____   ____  
+	 |__   __/ __ \|  __ \ / __ \ 
+	    | | | |  | | |  | | |  | |
+	    | | | |  | | |  | | |  | |
+	    | | | |__| | |__| | |__| |
+	    |_|  \____/|_____/ \____/ 
+	                              
+	Implement readSettingsHandler
+	*/
+	http.Error(w, "Not implemented", http.StatusNotImplemented)
+}
+
+func updateSettingsHandler(w http.ResponseWriter, r *http.Request) {
+	/*
+	  _______ ____  _____   ____  
+	 |__   __/ __ \|  __ \ / __ \ 
+	    | | | |  | | |  | | |  | |
+	    | | | |  | | |  | | |  | |
+	    | | | |__| | |__| | |__| |
+	    |_|  \____/|_____/ \____/ 
+	                              
+	Implement updateSettingsHandler
+	*/
+	http.Error(w, "Not implemented", http.StatusNotImplemented)
+}
+
+func createVoucherHandler(w http.ResponseWriter, r *http.Request) {
+	/*
+	  _______ ____  _____   ____  
+	 |__   __/ __ \|  __ \ / __ \ 
+	    | | | |  | | |  | | |  | |
+	    | | | |  | | |  | | |  | |
+	    | | | |__| | |__| | |__| |
+	    |_|  \____/|_____/ \____/ 
+	                              
+	Implement createVoucherHandler
+	*/
+	http.Error(w, "Not implemented", http.StatusNotImplemented)
+}
+
+func readVouchersHandler(w http.ResponseWriter, r *http.Request) {
+	/*
+	  _______ ____  _____   ____  
+	 |__   __/ __ \|  __ \ / __ \ 
+	    | | | |  | | |  | | |  | |
+	    | | | |  | | |  | | |  | |
+	    | | | |__| | |__| | |__| |
+	    |_|  \____/|_____/ \____/ 
+	                              
+	Implement readVouchersHandler
+	*/
+	http.Error(w, "Not implemented", http.StatusNotImplemented)
+}
+
+func deleteVoucherHandler(w http.ResponseWriter, r *http.Request) {
+	/*
+	  _______ ____  _____   ____  
+	 |__   __/ __ \|  __ \ / __ \ 
+	    | | | |  | | |  | | |  | |
+	    | | | |  | | |  | | |  | |
+	    | | | |__| | |__| | |__| |
+	    |_|  \____/|_____/ \____/ 
+	                              
+	Implement deleteVoucherHandler
+	*/
+	http.Error(w, "Not implemented", http.StatusNotImplemented)
+}
+
+func kvReadHandler(w http.ResponseWriter, r *http.Request) {
+	/*
+	  _______ ____  _____   ____  
+	 |__   __/ __ \|  __ \ / __ \ 
+	    | | | |  | | |  | | |  | |
+	    | | | |  | | |  | | |  | |
+	    | | | |__| | |__| | |__| |
+	    |_|  \____/|_____/ \____/ 
+	                              
+	Implement kvReadHandler
+	*/
+	http.Error(w, "Not implemented", http.StatusNotImplemented)
+}
+
+func kvWriteHandler(w http.ResponseWriter, r *http.Request) {
+	/*
+	  _______ ____  _____   ____  
+	 |__   __/ __ \|  __ \ / __ \ 
+	    | | | |  | | |  | | |  | |
+	    | | | |  | | |  | | |  | |
+	    | | | |__| | |__| | |__| |
+	    |_|  \____/|_____/ \____/ 
+	                              
+	Implement kvWriteHandler
+	*/
+	http.Error(w, "Not implemented", http.StatusNotImplemented)
+}
+
+func kvClearHandler(w http.ResponseWriter, r *http.Request) {
+	/*
+	  _______ ____  _____   ____  
+	 |__   __/ __ \|  __ \ / __ \ 
+	    | | | |  | | |  | | |  | |
+	    | | | |  | | |  | | |  | |
+	    | | | |__| | |__| | |__| |
+	    |_|  \____/|_____/ \____/ 
+	                              
+	Implement kvClearHandler
+	*/
+	http.Error(w, "Not implemented", http.StatusNotImplemented)
+}
 
 // Helper functions
 
@@ -573,6 +828,16 @@ func hashPassword(password string) (string, error) {
 func checkPasswordHash(password, hash string) bool {
 	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
 	return err == nil
+}
+
+// Helper function to generate a secure random string
+func generateSecureRandomString(length int) (string, error) {
+    bytes := make([]byte, length)
+    _, err := rand.Read(bytes)
+    if err != nil {
+        return "", err
+    }
+    return base64.URLEncoding.EncodeToString(bytes), nil
 }
 
 

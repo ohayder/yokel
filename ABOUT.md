@@ -163,3 +163,20 @@ Settings Structure:
     
 }
 ```
+
+# Configuration Options
+
+The following options can be set in the `yokel.yaml` configuration file:
+
+- `port`: The port number on which the server listens (default: 8080)
+- `binding`: The IP address to bind the server to (default: "0.0.0.0")
+- `url`: The base URL of the server (default: "http://localhost")
+- `key`: Path to the SSL key file (optional)
+- `cert`: Path to the SSL certificate file (optional)
+- `voucher_max_lifetime`: Maximum lifetime of a voucher (default: "1h")
+- `voucher_max_per_user`: Maximum number of vouchers per user (default: 5)
+- `no_kv`: Disable the key-value store functionality (default: false)
+- `user_data_max`: Maximum size of user data in bytes (default: 100)
+- `jwt_secret_key`: Secret key used for JWT token signing and verification (automatically generated during installation)
+
+Note: The `jwt_secret_key` is automatically generated during installation for security reasons. You can change it manually in the configuration file if needed, but make sure to keep it secret and use a strong, random value.
