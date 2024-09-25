@@ -297,6 +297,28 @@ func deleteAccountHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
 
+    // Parse the request body to get the password
+    var deleteRequest struct {
+        Password string `json:"password"`
+    }
+    if err := json.NewDecoder(r.Body).Decode(&deleteRequest); err != nil {
+        http.Error(w, "Invalid request body", http.StatusBadRequest)
+        return
+    }
+
+    // Retrieve the user from the database
+    var user User
+    if err := db.First(&user, userID).Error; err != nil {
+        http.Error(w, "User not found", http.StatusNotFound)
+        return
+    }
+
+    // Verify the provided password
+    if !checkPasswordHash(deleteRequest.Password, user.Password) {
+        http.Error(w, "Invalid password", http.StatusUnauthorized)
+        return
+    }
+
     // Start a transaction
     tx := db.Begin()
 
@@ -315,7 +337,7 @@ func deleteAccountHandler(w http.ResponseWriter, r *http.Request) {
     }
 
     // Delete the user
-    if err := tx.Delete(&User{}, userID).Error; err != nil {
+    if err := tx.Delete(&user).Error; err != nil {
         tx.Rollback()
         http.Error(w, "Failed to delete user", http.StatusInternalServerError)
         return
@@ -332,7 +354,4 @@ func deleteAccountHandler(w http.ResponseWriter, r *http.Request) {
     json.NewEncoder(w).Encode(map[string]string{
         "message": "Account deleted successfully",
     })
-
-    // Note: In a production environment, you might want to implement a soft delete
-    // or archive user data instead of permanent deletion
 }
