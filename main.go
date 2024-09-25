@@ -200,7 +200,7 @@ func startServer(path string) error {
 		return fmt.Errorf("failed to open database: %v", err)
 	}
 	// Migrate the schema
-	err = db.AutoMigrate(&User{}, &Session{}, &Voucher{}, &UserSettings{})
+	err = db.AutoMigrate(&User{}, &Session{}, &Voucher{})
 	if err != nil {
 		return fmt.Errorf("failed to migrate database: %v", err)
 	}
@@ -278,9 +278,6 @@ func setupRouter() *mux.Router {
 	api.HandleFunc("/user/account/{sessionUUID}/read", rateLimitMiddleware(authenticateSession(readAccountHandler))).Methods("GET")
 	api.HandleFunc("/user/account/{sessionUUID}/update", rateLimitMiddleware(authenticateSession(updateAccountHandler))).Methods("POST")
 	api.HandleFunc("/user/account/{sessionUUID}/delete", rateLimitMiddleware(authenticateSession(deleteAccountHandler))).Methods("DELETE")
-
-	api.HandleFunc("/user/settings/{sessionUUID}/read", rateLimitMiddleware(authenticateSession(readSettingsHandler))).Methods("GET")
-	api.HandleFunc("/user/settings/{sessionUUID}/update", rateLimitMiddleware(authenticateSession(updateSettingsHandler))).Methods("POST")
 
 	api.HandleFunc("/user/voucher/{sessionUUID}/create", rateLimitMiddleware(authenticateSession(createVoucherHandler))).Methods("POST")
 	api.HandleFunc("/user/voucher/{sessionUUID}/read", rateLimitMiddleware(authenticateSession(readVouchersHandler))).Methods("GET")

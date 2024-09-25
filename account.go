@@ -17,16 +17,6 @@ type User struct {
     Password string
 }
 
-// Update the UserSettings struct
-type UserSettings struct {
-    gorm.Model
-    UserID           uint   `gorm:"uniqueIndex"`
-    NotificationsOn  bool
-    DarkModeEnabled  bool
-    Language         string
-    // Add other settings fields as needed
-}
-
 // Update the Session struct
 type Session struct {
     gorm.Model
