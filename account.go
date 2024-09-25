@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"time"
+    "fmt"
 
 	"github.com/golang-jwt/jwt/v5"
 	"gorm.io/gorm"
@@ -26,6 +27,14 @@ type Session struct {
     BumpAttempts  int       // Track the number of bump attempts
     FailedBumps   int       // Track the number of failed bumps
 }
+
+type MagicLink struct {
+	Email     string
+	Token     string
+	ExpiresAt time.Time
+}
+
+var magicLinks = make(map[string]MagicLink)
 
 // createUserHandler handles /api/v1/user/create
 func createUserHandler(w http.ResponseWriter, r *http.Request) {
@@ -50,24 +59,29 @@ func createUserHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Send magic link with finalization token (stubbed out)
-	finalizationToken := generateUUID()
-	/*
-	  _______ ____  _____   ____  
-	 |__   __/ __ \|  __ \ / __ \ 
-	    | | | |  | | |  | | |  | |
-	    | | | |  | | |  | | |  | |
-	    | | | |__| | |__| | |__| |
-	    |_|  \____/|_____/ \____/ 
-	                              
-	Here you would send an email containing the finalization token
-	For now, we just return the token in the response (for testing)
-	*/
+	// Generate magic link token
+	token := generateUUID()
+	expiresAt := time.Now().Add(5 * time.Minute)
+
+	// Store magic link information
+	magicLinks[token] = MagicLink{
+		Email:     email,
+		Token:     token,
+		ExpiresAt: expiresAt,
+	}
+
+	// Send magic link email
+	magicLinkURL := fmt.Sprintf("%s/finalize?token=%s", config.URL, token)
+	emailBody := fmt.Sprintf("Click the following link to finalize your account creation: %s", magicLinkURL)
+	err := emailSender.SendEmail(email, "Finalize Your Account", emailBody)
+	if err != nil {
+		http.Error(w, "Failed to send magic link email", http.StatusInternalServerError)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	resp := map[string]string{
-		"message":             "User creation initiated. Please check your email to finalize registration.",
-		"finalization_token":  finalizationToken,
+		"message": "Magic link sent to your email. Please check your inbox to finalize account creation.",
 	}
 	json.NewEncoder(w).Encode(resp)
 }
@@ -76,29 +90,24 @@ func createUserHandler(w http.ResponseWriter, r *http.Request) {
 func finalizeUserHandler(w http.ResponseWriter, r *http.Request) {
 	username := r.Header.Get(HeaderUsername)
 	password := r.Header.Get(HeaderPassword)
-	finalizationToken := r.Header.Get(HeaderFinalizationToken)
+	token := r.Header.Get(HeaderFinalizationToken)
 
 	if err := validateUsername(username); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	if password == "" || finalizationToken == "" {
+	if password == "" || token == "" {
 		http.Error(w, "Password and Finalization Token are required", http.StatusBadRequest)
 		return
 	}
 
-	/*
-	  _______ ____  _____   ____  
-	 |__   __/ __ \|  __ \ / __ \ 
-	    | | | |  | | |  | | |  | |
-	    | | | |  | | |  | | |  | |
-	    | | | |__| | |__| | |__| |
-	    |_|  \____/|_____/ \____/ 
-	                              
-	Validate finalization token (stubbed out)
-	In a real application, you would verify if the token is valid and associated with the username
-	*/
+	// Validate the magic link token
+	magicLink, exists := magicLinks[token]
+	if !exists || time.Now().After(magicLink.ExpiresAt) {
+		http.Error(w, "Invalid or expired finalization token", http.StatusUnauthorized)
+		return
+	}
 
 	// Hash the password
 	hashedPassword, err := hashPassword(password)
@@ -110,6 +119,7 @@ func finalizeUserHandler(w http.ResponseWriter, r *http.Request) {
 	// Create user account
 	user := User{
 		Username: username,
+		Email:    magicLink.Email,
 		Password: hashedPassword,
 	}
 	if err := db.Create(&user).Error; err != nil {
@@ -117,9 +127,12 @@ func finalizeUserHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Remove the used magic link
+	delete(magicLinks, token)
+
 	w.Header().Set("Content-Type", "application/json")
 	resp := map[string]string{
-		"message": "User account finalized.",
+		"message": "User account finalized successfully.",
 	}
 	json.NewEncoder(w).Encode(resp)
 }

@@ -9,6 +9,15 @@ import (
 	"gorm.io/gorm"
 )
 
+// Update the Voucher struct
+type Voucher struct {
+    gorm.Model
+    VoucherID string    `gorm:"uniqueIndex"`
+    UserID    uint
+    ExpiresAt time.Time
+    UserData  []byte    `gorm:"size:64"` // Up to 64 bytes of user data
+}
+
 func authenticateVoucherHandler(w http.ResponseWriter, r *http.Request) {
     // Extract the voucher ID from the request header
     voucherID := r.Header.Get(HeaderUserVoucher)

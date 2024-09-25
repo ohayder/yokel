@@ -171,6 +171,11 @@ The following options can be set in the `yokel.yaml` configuration file:
 - `no_kv`: Disable the key-value store functionality (default: false)
 - `user_data_max`: Maximum size of user data in bytes (default: 100)
 - `jwt_secret_key`: Secret key used for JWT token signing and verification (automatically generated during installation)
+- `smtp_host`: SMTP server hostname
+- `smtp_port`: SMTP server port
+- `smtp_username`: SMTP username for authentication
+- `smtp_password`: SMTP password for authentication
+- `smtp_from`: Email address to use as the sender
 
 Note: The `jwt_secret_key` is automatically generated during installation for security reasons. You can change it manually in the configuration file if needed, but make sure to keep it secret and use a strong, random value.
 
@@ -227,5 +232,12 @@ The voucher system allows for pre-authenticated, time-limited access to resource
 - Voucher lifetime is configurable, with a maximum set in the configuration
 - The number of vouchers per user is limited (configurable)
 - Vouchers can be created, listed, deleted, and authenticated
+
+## Email Sending
+
+The system now includes email functionality for account creation:
+- Magic links are sent to users' email addresses for account finalization
+- Magic links expire after 5 minutes
+- The email sending service is abstracted behind an interface for easy testing and potential future changes
 
 These additional features enhance the security, flexibility, and functionality of the Yokel backend system beyond the core specifications.

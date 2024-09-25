@@ -24,17 +24,6 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// Update the Voucher struct
-type Voucher struct {
-    gorm.Model
-    VoucherID string    `gorm:"uniqueIndex"`
-    UserID    uint
-    ExpiresAt time.Time
-    UserData  []byte    `gorm:"size:64"` // Up to 64 bytes of user data
-}
-
-
-
 // Update the Config struct (if needed)
 type Config struct {
     Port               int    `yaml:"port"`
@@ -47,6 +36,11 @@ type Config struct {
     NoKV               bool   `yaml:"no_kv"`
     UserDataMax        int    `yaml:"user_data_max"`
     JWTSecretKey       string `yaml:"jwt_secret_key"`
+    SMTPHost           string `yaml:"smtp_host"`
+    SMTPPort           int    `yaml:"smtp_port"`
+    SMTPUsername       string `yaml:"smtp_username"`
+    SMTPPassword       string `yaml:"smtp_password"`
+    SMTPFrom           string `yaml:"smtp_from"`
 }
 
 // Global constants for default configuration
@@ -67,6 +61,7 @@ var (
 	installPath string
 	jwtKey      []byte
 	limiter     *rate.Limiter
+	emailSender EmailSender
 )
 
 // Global constants for filenames
@@ -204,6 +199,15 @@ func startServer(path string) error {
 	if err != nil {
 		return fmt.Errorf("failed to migrate database: %v", err)
 	}
+
+	// Initialize email sender
+	emailSender = NewGomailSender(
+		config.SMTPHost,
+		config.SMTPPort,
+		config.SMTPUsername,
+		config.SMTPPassword,
+		config.SMTPFrom,
+	)
 
 	// Start HTTP server
 	r := setupRouter()
