@@ -28,8 +28,6 @@ Usage:
 
 The UV-Buhd v1 api does the following:
     Allows the creation and management of a "user" account. This might be a human, or just a password protected object. Doesn't really matter.
-    The "user" is associated with a  "settings" structure. The setting structure must be declared by the host (driver) application that uses this library.
-    In this way Yokel attempts to be some abstract "user" authentication service thats easily reusable.
 And More!:
     This API also has a concept of "vouchers" or "pre-authenticated, encrypted, data resources.
     It allows a "user" to pre-authenticate some request for a given amount of time.

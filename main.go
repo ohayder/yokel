@@ -201,13 +201,16 @@ func startServer(path string) error {
 	}
 
 	// Initialize email sender
-	emailSender = NewGomailSender(
+	emailSender, err = NewGomailSender(
 		config.SMTPHost,
 		config.SMTPPort,
 		config.SMTPUsername,
 		config.SMTPPassword,
 		config.SMTPFrom,
 	)
+	if err != nil {
+		return fmt.Errorf("failed to initialize email sender: %v", err)
+	}
 
 	// Start HTTP server
 	r := setupRouter()
@@ -269,6 +272,7 @@ func setupRouter() *mux.Router {
 	r := mux.NewRouter()
 
 	api := r.PathPrefix("/api/v1").Subrouter()
+	api.Use(apiVersionMiddleware)
 
 	// Public endpoints
 	api.HandleFunc("/user/create", rateLimitMiddleware(createUserHandler)).Methods("POST")
@@ -317,6 +321,16 @@ func rateLimitMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// Middleware to check API version
+func apiVersionMiddleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        if r.Header.Get(HeaderAPIVersion) != "1" {
+            http.Error(w, "Invalid or missing API version", http.StatusBadRequest)
+            return
+        }
+        next.ServeHTTP(w, r)
+    })
+}
 
 // Helper functions
 
